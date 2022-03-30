@@ -20,7 +20,11 @@ package org.apache.pinot.controller.helix.core.assignment.instance;
 
 import com.google.common.base.Preconditions;
 import java.util.ArrayList;
-import java.util.Comparator;
+import java.util.Collections;
+import java.util.Deque;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -48,52 +52,121 @@ public class InstanceTagPoolSelector {
 
   /**
    * Returns a map from pool to instance configs based on the tag and pool config for the given instance configs.
+   * @param instanceConfigs list of latest instance configs from ZK.
+   * @param existingPoolToInstancesMap existing instance with sequence that should be respected. An empty list
+   *                                      means no preceding sequence to respect and the instances would be sorted.
    */
-  public Map<Integer, List<InstanceConfig>> selectInstances(List<InstanceConfig> instanceConfigs) {
+  public Map<Integer, List<InstanceConfig>> selectInstances(List<InstanceConfig> instanceConfigs,
+      Map<Integer, List<String>> existingPoolToInstancesMap) {
     int tableNameHash = Math.abs(_tableNameWithType.hashCode());
     LOGGER.info("Starting instance tag/pool selection for table: {} with hash: {}", _tableNameWithType, tableNameHash);
 
-    // Filter out the instances with the correct tag
+    // If existingPoolToInstancesMap is null, treat it as an empty map.
+    if (existingPoolToInstancesMap == null) {
+      existingPoolToInstancesMap = Collections.emptyMap();
+    }
+    // Filter out the instances with the correct tag.
+    // Use LinkedHashMap here to retain the sorted list of instance names.
     String tag = _tagPoolConfig.getTag();
-    List<InstanceConfig> candidateInstanceConfigs = new ArrayList<>();
+    Map<String, InstanceConfig> candidateInstanceConfigsMap = new LinkedHashMap<>();
     for (InstanceConfig instanceConfig : instanceConfigs) {
       if (instanceConfig.getTags().contains(tag)) {
-        candidateInstanceConfigs.add(instanceConfig);
+        candidateInstanceConfigsMap.put(instanceConfig.getInstanceName(), instanceConfig);
       }
     }
-    candidateInstanceConfigs.sort(Comparator.comparing(InstanceConfig::getInstanceName));
-    int numCandidateInstances = candidateInstanceConfigs.size();
+
+    // Find out newly added instances from the latest copies of instance configs.
+    // A deque is used here in order to retain the sequence,
+    // given the fact that the list of instance configs is always sorted.
+    Deque<String> newlyAddedInstances = new LinkedList<>(candidateInstanceConfigsMap.keySet());
+    for (List<String> existingInstancesWithSequence : existingPoolToInstancesMap.values()) {
+      newlyAddedInstances.removeAll(existingInstancesWithSequence);
+    }
+
+    int numCandidateInstances = candidateInstanceConfigsMap.size();
     Preconditions.checkState(numCandidateInstances > 0, "No enabled instance has the tag: %s", tag);
     LOGGER.info("{} enabled instances have the tag: {} for table: {}", numCandidateInstances, tag, _tableNameWithType);
 
-    Map<Integer, List<InstanceConfig>> poolToInstanceConfigsMap = new TreeMap<>();
+    Map<Integer, List<InstanceConfig>> poolToLatestInstanceConfigsMap = new TreeMap<>();
     if (_tagPoolConfig.isPoolBased()) {
-      // Pool based selection
+      // Pool based selection. All the instances should be associated with a specific pool number.
+      // Instance selection should be done within the same pool.
+      // E.g.: Pool0 -> [ I1, I2, I3 ]
+      //       Pool1 -> [ I4, I5, I6 ]
 
-      // Extract the pool information from the instance configs
-      for (InstanceConfig instanceConfig : candidateInstanceConfigs) {
+      // Each pool number associates with a map that key is the instance name and value is the instance config.
+      Map<Integer, Map<String, InstanceConfig>> poolToInstanceConfigsMap = new HashMap<>();
+      // Each pool number associates with a list of newly added instance configs,
+      // so that new instances can be fetched from this list.
+      Map<Integer, Deque<InstanceConfig>> poolToNewInstanceConfigsMap = new HashMap<>();
+
+      // Extract the pool information from the instance configs.
+      for (Map.Entry<String, InstanceConfig> entry : candidateInstanceConfigsMap.entrySet()) {
+        String instanceName = entry.getKey();
+        InstanceConfig instanceConfig = entry.getValue();
         Map<String, String> poolMap = instanceConfig.getRecord().getMapField(InstanceUtils.POOL_KEY);
         if (poolMap != null && poolMap.containsKey(tag)) {
           int pool = Integer.parseInt(poolMap.get(tag));
-          poolToInstanceConfigsMap.computeIfAbsent(pool, k -> new ArrayList<>()).add(instanceConfig);
+          poolToInstanceConfigsMap.computeIfAbsent(pool, k -> new TreeMap<>()).put(instanceName, instanceConfig);
+          if (newlyAddedInstances.contains(instanceName)) {
+            poolToNewInstanceConfigsMap.computeIfAbsent(pool, k -> new LinkedList<>()).add(instanceConfig);
+          }
         }
       }
+
+      for (Map.Entry<Integer, List<String>> entry : existingPoolToInstancesMap.entrySet()) {
+        Integer pool = entry.getKey();
+        List<String> existingInstanceAssignmentInPool = entry.getValue();
+        List<InstanceConfig> candidateInstanceConfigsWithSequence = new ArrayList<>();
+        for (String existingInstance: existingInstanceAssignmentInPool) {
+          InstanceConfig instanceConfig = poolToInstanceConfigsMap.get(pool).get(existingInstance);
+          // Add instances to the candidate list and respect the sequence of the existing instances from the ZK.
+          // The missing/removed instances will be replaced by the newly instances.
+          // If the instance still exists from ZK, then add it to the candidate list.
+          // E.g. if the old instances are: [I1, I2, I3, I4] and the new instance are: [I1, I3, I4, I5, I6],
+          // the removed instance is I2 and the newly added instances are I5 and I6.
+          // The position of I2 would be replaced by I5, the new remaining I6 would be appended to the tail.
+          // Thus, the new order would be [I1, I5, I3, I4, I6].
+          if (instanceConfig != null) {
+            candidateInstanceConfigsWithSequence.add(instanceConfig);
+          } else {
+            // The current chosen instance no longer lives in the cluster any more, thus pick a new instance.
+            InstanceConfig newInstanceConfig = poolToNewInstanceConfigsMap.get(pool).pollFirst();
+            // If there is no new instance from the same pool, then don't add it.
+            if (newInstanceConfig != null) {
+              candidateInstanceConfigsWithSequence.add(newInstanceConfig);
+            }
+          }
+        }
+        poolToLatestInstanceConfigsMap.put(pool, candidateInstanceConfigsWithSequence);
+      }
+
+      // The preceding list of instances has been traversed. Add the remaining new instances.
+      for (Map.Entry<Integer, Deque<InstanceConfig>> entry : poolToNewInstanceConfigsMap.entrySet()) {
+        Integer pool = entry.getKey();
+        Deque<InstanceConfig> remainingNewInstanceConfigs = entry.getValue();
+        poolToLatestInstanceConfigsMap.computeIfAbsent(pool, k -> new ArrayList<>())
+            .addAll(remainingNewInstanceConfigs);
+      }
+
       Preconditions.checkState(!poolToInstanceConfigsMap.isEmpty(),
           "No enabled instance has the pool configured for the tag: %s", tag);
       Map<Integer, Integer> poolToNumInstancesMap = new TreeMap<>();
-      for (Map.Entry<Integer, List<InstanceConfig>> entry : poolToInstanceConfigsMap.entrySet()) {
+      for (Map.Entry<Integer, List<InstanceConfig>> entry : poolToLatestInstanceConfigsMap.entrySet()) {
         poolToNumInstancesMap.put(entry.getKey(), entry.getValue().size());
       }
       LOGGER.info("Number instances for each pool: {} for table: {}", poolToNumInstancesMap, _tableNameWithType);
 
-      // Calculate the pools to select based on the selection config
-      Set<Integer> pools = poolToInstanceConfigsMap.keySet();
+      // Calculate the pools to select based on the selection config.
+      // Note: the pools here refers to the key set of poolToLatestInstanceConfigsMap,
+      //       so that removing the pool from the set means removing the key-value pair from the map.
+      Set<Integer> pools = poolToLatestInstanceConfigsMap.keySet();
       List<Integer> poolsToSelect = _tagPoolConfig.getPools();
       if (poolsToSelect != null && !poolsToSelect.isEmpty()) {
         Preconditions.checkState(pools.containsAll(poolsToSelect), "Cannot find all instance pools configured: %s",
             poolsToSelect);
       } else {
-        int numPools = poolToInstanceConfigsMap.size();
+        int numPools = poolToLatestInstanceConfigsMap.size();
         int numPoolsToSelect = _tagPoolConfig.getNumPools();
         if (numPoolsToSelect > 0) {
           Preconditions
@@ -106,7 +179,7 @@ public class InstanceTagPoolSelector {
         // Directly return the map if all the pools are selected
         if (numPools == numPoolsToSelect) {
           LOGGER.info("Selecting all {} pools: {} for table: {}", numPools, pools, _tableNameWithType);
-          return poolToInstanceConfigsMap;
+          return poolToLatestInstanceConfigsMap;
         }
 
         // Select pools based on the table name hash to evenly distribute the tables
@@ -121,12 +194,44 @@ public class InstanceTagPoolSelector {
       LOGGER.info("Selecting pools: {} for table: {}", poolsToSelect, _tableNameWithType);
       pools.retainAll(poolsToSelect);
     } else {
-      // Non-pool based selection
+      // Non-pool based selection. All the instances should be associated with a single pool, which is always 0.
+      // E.g.: Pool0 -> [ I1, I2, I3, I4, I5, I6 ]
 
-      LOGGER.info("Selecting {} instances for table: {}", numCandidateInstances, _tableNameWithType);
+      LOGGER.info("Selecting {} instances for table: {}", candidateInstanceConfigsMap.size(), _tableNameWithType);
       // Put all instance configs as pool 0
-      poolToInstanceConfigsMap.put(0, candidateInstanceConfigs);
+
+      for (Map.Entry<Integer, List<String>> entry : existingPoolToInstancesMap.entrySet()) {
+        Integer pool = entry.getKey();
+        List<String> existingInstanceAssignmentInPool = entry.getValue();
+        List<InstanceConfig> candidateInstanceConfigsWithSequence = new ArrayList<>();
+        for (String existingInstance: existingInstanceAssignmentInPool) {
+          InstanceConfig instanceConfig = candidateInstanceConfigsMap.get(existingInstance);
+          // Add instances to the candidate list and respect the sequence of the existing instances from the ZK.
+          // The missing/removed instances will be replaced by the newly instances.
+          // If the instance still exists from ZK, then add it to the candidate list.
+          // E.g. if the old instances are: [I1, I2, I3, I4] and the new instance are: [I1, I3, I4, I5, I6],
+          // the removed instance is I2 and the newly added instances are I5 and I6.
+          // The position of I2 would be replaced by I5, the new remaining I6 would be appended to the tail.
+          // Thus, the new order would be [I1, I5, I3, I4, I6].
+          if (instanceConfig != null) {
+            candidateInstanceConfigsWithSequence.add(instanceConfig);
+          } else {
+            // The current chosen instance no longer lives in the cluster any more, thus pick a new instance.
+            String newInstance = newlyAddedInstances.pollFirst();
+            // If there is no new instance from the same pool, then don't add it.
+            if (newInstance != null) {
+              candidateInstanceConfigsWithSequence.add(candidateInstanceConfigsMap.get(newInstance));
+            }
+          }
+        }
+        poolToLatestInstanceConfigsMap.put(pool, candidateInstanceConfigsWithSequence);
+      }
+      // The preceding list of instances has been traversed. Add the remaining new instances.
+      for (String remainingNewInstance : newlyAddedInstances) {
+        poolToLatestInstanceConfigsMap.computeIfAbsent(0, k -> new ArrayList<>())
+            .add(candidateInstanceConfigsMap.get(remainingNewInstance));
+      }
     }
-    return poolToInstanceConfigsMap;
+    return poolToLatestInstanceConfigsMap;
   }
 }

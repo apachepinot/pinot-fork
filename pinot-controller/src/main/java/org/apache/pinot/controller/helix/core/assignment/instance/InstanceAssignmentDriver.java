@@ -21,6 +21,8 @@ package org.apache.pinot.controller.helix.core.assignment.instance;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
+import javax.annotation.Nullable;
 import org.apache.helix.model.InstanceConfig;
 import org.apache.pinot.common.assignment.InstanceAssignmentConfigUtils;
 import org.apache.pinot.common.assignment.InstancePartitions;
@@ -51,20 +53,39 @@ public class InstanceAssignmentDriver {
     _tableConfig = tableConfig;
   }
 
+  /**
+   * Assign instances to InstancePartitions object.
+   * @param instancePartitionsType type of instance partitions
+   * @param instanceConfigs list of instance configs
+   * @param existingPoolToInstancesMap a map of existing pools and the instances with sequence that should be respected.
+   *                                   If it's null, there is no requirement to respect the existing sequence and thus
+   *                                   the instance will be sorted.
+   *                                   If it's not null but an empty list, there is no preceding sequence to respect,
+   *                                   and the instances will also be sorted.
+   */
   public InstancePartitions assignInstances(InstancePartitionsType instancePartitionsType,
-      List<InstanceConfig> instanceConfigs) {
+      List<InstanceConfig> instanceConfigs, @Nullable Map<Integer, List<String>> existingPoolToInstancesMap) {
+    boolean shouldRetainInstanceSequence = (existingPoolToInstancesMap != null);
     String tableNameWithType = _tableConfig.getTableName();
-    LOGGER.info("Starting {} instance assignment for table: {}", instancePartitionsType, tableNameWithType);
+    LOGGER.info("Starting {} instance assignment for table: {}. Should retain instance sequence: {}",
+        instancePartitionsType, tableNameWithType, shouldRetainInstanceSequence);
 
     InstanceAssignmentConfig assignmentConfig =
         InstanceAssignmentConfigUtils.getInstanceAssignmentConfig(_tableConfig, instancePartitionsType);
     InstanceTagPoolSelector tagPoolSelector =
         new InstanceTagPoolSelector(assignmentConfig.getTagPoolConfig(), tableNameWithType);
-    Map<Integer, List<InstanceConfig>> poolToInstanceConfigsMap = tagPoolSelector.selectInstances(instanceConfigs);
+    Map<Integer, List<InstanceConfig>> poolToInstanceConfigsMap =
+        tagPoolSelector.selectInstances(instanceConfigs, existingPoolToInstancesMap);
 
     InstanceConstraintConfig constraintConfig = assignmentConfig.getConstraintConfig();
     List<InstanceConstraintApplier> constraintAppliers = new ArrayList<>();
-    if (constraintConfig == null) {
+    // If there is some k-v pair in the existingPoolToInstancesMap, retain the instance sequence for existing pools.
+    // For new pools, rotation will be applied just as the default constraint applier.
+    if (existingPoolToInstancesMap != null && !existingPoolToInstancesMap.isEmpty()) {
+      constraintAppliers
+          .add(new RetainedSequenceInstanceConstraintApplier(tableNameWithType, existingPoolToInstancesMap));
+    }
+    if (constraintConfig == null && constraintAppliers.isEmpty()) {
       LOGGER.info("No instance constraint is configured, using default hash-based-rotate instance constraint");
       constraintAppliers.add(new HashBasedRotateInstanceConstraintApplier(tableNameWithType));
     }
@@ -77,7 +98,32 @@ public class InstanceAssignmentDriver {
         new InstanceReplicaGroupPartitionSelector(assignmentConfig.getReplicaGroupPartitionConfig(), tableNameWithType);
     InstancePartitions instancePartitions = new InstancePartitions(
         instancePartitionsType.getInstancePartitionsName(TableNameBuilder.extractRawTableName(tableNameWithType)));
+    if (shouldRetainInstanceSequence) {
+      // Keep the pool to instances map if instance sequence should be retained.
+      // This map will be persisted into ZNode if dryRun is false.
+      instancePartitions
+          .setPoolToInstancesMap(generatePoolToInstanceNamesMapFromPoolToInstanceConfigsMap(poolToInstanceConfigsMap));
+    }
     replicaPartitionSelector.selectInstances(poolToInstanceConfigsMap, instancePartitions);
     return instancePartitions;
+  }
+
+  private Map<Integer, List<String>> generatePoolToInstanceNamesMapFromPoolToInstanceConfigsMap(
+      Map<Integer, List<InstanceConfig>> poolToInstanceConfigsMap) {
+    Map<Integer, List<String>> partitionToInstancesMap = new TreeMap<>();
+    for (Map.Entry<Integer, List<InstanceConfig>> entry : poolToInstanceConfigsMap.entrySet()) {
+      Integer pool = entry.getKey();
+      List<InstanceConfig> instanceConfigs = entry.getValue();
+      partitionToInstancesMap.put(pool, extractInstanceNamesFromInstanceConfigs(instanceConfigs));
+    }
+    return partitionToInstancesMap;
+  }
+
+  private List<String> extractInstanceNamesFromInstanceConfigs(List<InstanceConfig> instanceConfigs) {
+    List<String> instanceNames = new ArrayList<>(instanceConfigs.size());
+    for (InstanceConfig instanceConfig : instanceConfigs) {
+      instanceNames.add(instanceConfig.getInstanceName());
+    }
+    return instanceNames;
   }
 }
