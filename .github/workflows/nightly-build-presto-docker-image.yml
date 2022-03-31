@@ -16,30 +16,11 @@
 # specific language governing permissions and limitations
 # under the License.
 #
-name: Presto Pinot Docker Image Build and Publish
+name: Nightly Presto Pinot Docker Image Build and Publish
 
 on:
-  workflow_dispatch:
-    inputs:
-      gitUrl:
-        description: "The git url to check out to build Presto, use https not ssh."
-        default: "https://github.com/prestodb/presto.git"
-        required: true
-      commit:
-        description: "The branch/commit to check out to build Presto image.."
-        default: "master"
-        required: true
-      platform:
-        description: "The platform of the image to build, e.g. linux/amd64"
-        default: "linux/amd64"
-        required: true
-      dockerImageName:
-        description: "The docker image name, default is 'apachepinot/pinot-presto'"
-        default: "apachepinot/pinot-presto"
-        required: true
-      tags:
-        description: "Tags to push of the image, comma separated, e.g. tag1,tag2,tag3"
-        default: ""
+  schedule:
+  - cron: '0 0 * * *' # run at 0 AM UTC
 
 jobs:
   build-presto-pinot-docker-image:
@@ -59,9 +40,9 @@ jobs:
     - name: Build and push the Docker image
       env:
         DOCKER_FILE_BASE_DIR: "docker/images/pinot-presto"
-        DOCKER_IMAGE_NAME: ${{ github.event.inputs.dockerImageName }}
-        BUILD_PLATFORM: ${{ github.event.inputs.platform }}
-        PRESTO_GIT_URL: ${{ github.event.inputs.gitUrl }}
-        PRESTO_BRANCH: ${{ github.event.inputs.commit }}
-        TAGS: ${{ github.event.inputs.tags }}
+        DOCKER_IMAGE_NAME: "apachepinot/pinot-presto"
+        BUILD_PLATFORM: "linux/amd64"
+        PRESTO_GIT_URL: "https://github.com/prestodb/presto.git"
+        PRESTO_BRANCH: "master"
+        TAGS: ""
       run: .github/workflows/scripts/docker/.presto_docker_image_build_and_push.sh
