@@ -40,6 +40,12 @@ on:
       tags:
         description: "Tags to push of the image, comma separated, e.g. tag1,tag2,tag3"
         default: ""
+      kafkaVersion:
+        description: "Kafka version"
+        default: "2.0"
+      jdkVersion:
+        description: "JDK version"
+        default: "11"
 
 jobs:
   build-pinot-docker-image:
@@ -63,5 +69,7 @@ jobs:
         BUILD_PLATFORM: ${{ github.event.inputs.platform }}
         PINOT_GIT_URL: ${{ github.event.inputs.gitUrl }}
         PINOT_BRANCH: ${{ github.event.inputs.commit }}
+        KAFKA_VERSION: ${{ github.event.inputs.kafkaVersion }}
+        JDK_VERSION: ${{ github.event.inputs.jdkVersion }}
         TAGS: ${{ github.event.inputs.tags }}
       run: .github/workflows/scripts/docker/.pinot_docker_image_build_and_push.sh
