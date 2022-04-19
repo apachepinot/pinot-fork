@@ -30,6 +30,12 @@ fi
 if [ -z "${BUILD_PLATFORM}" ]; then
   BUILD_PLATFORM="linux/arm64,linux/amd64"
 fi
+if [ -z "${KAFKA_VERSION}" ]; then
+  KAFKA_VERSION="2.0"
+fi
+if [ -z "${JDK_VERSION}" ]; then
+  JDK_VERSION="11"
+fi
 
 COMMIT_ID=`git rev-parse --short HEAD`
 DATE=`date +%Y%m%d`
@@ -55,7 +61,10 @@ docker buildx build \
     --no-cache \
     --platform=${BUILD_PLATFORM} \
     --file Dockerfile \
-    --build-arg PINOT_GIT_URL=${PINOT_GIT_URL} --build-arg PINOT_BRANCH=${PINOT_BRANCH} \
+    --build-arg PINOT_GIT_URL=${PINOT_GIT_URL} \
+    --build-arg PINOT_BRANCH=${PINOT_BRANCH} \
+    --build-arg KAFKA_VERSION=${KAFKA_VERSION} \
+    --build-arg JDK_VERSION=${JDK_VERSION} \
     ${DOCKER_BUILD_TAGS} \
     --push \
     .
