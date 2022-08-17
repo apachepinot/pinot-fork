@@ -18,31 +18,45 @@
 #
 ARG JAVA_VERSION=11
 ARG OPENJDK_IMAGE=openjdk
-FROM ${OPENJDK_IMAGE}:${JAVA_VERSION} AS pinot_build_env
+FROM ${OPENJDK_IMAGE}:${JAVA_VERSION}
 
 LABEL MAINTAINER=dev@pinot.apache.org
 
+ENV MAVEN_HOME /usr/share/maven
+ENV MAVEN_CONFIG /root/.m2
+
 # extra dependency for running launcher
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends vim wget curl git automake bison flex g++ libboost-all-dev libevent-dev \
-    libssl-dev libtool make pkg-config && \
-    rm -rf /var/lib/apt/lists/*
+  apt-get install -y --no-install-recommends vim wget curl git automake bison flex g++ libboost-all-dev libevent-dev \
+  libssl-dev libtool make pkg-config && \
+  rm -rf /var/lib/apt/lists/*
 
 # install maven
 RUN mkdir -p /usr/share/maven /usr/share/maven/ref \
   && wget https://downloads.apache.org/maven/maven-3/3.6.3/binaries/apache-maven-3.6.3-bin.tar.gz -P /tmp \
   && tar -xzf /tmp/apache-maven-*.tar.gz -C /usr/share/maven --strip-components=1 \
   && rm -f /tmp/apache-maven-*.tar.gz \
-  && ln -s /usr/share/maven/bin/mvn /usr/bin/mvn
-ENV MAVEN_HOME /usr/share/maven
-ENV MAVEN_CONFIG /opt/.m2
+  && ln -s /usr/share/maven/bin/mvn /usr/bin/mvn \
+  && mvn help:evaluate -Dexpression=settings.localRepository
+
 
 # install thrift
 RUN  wget http://archive.apache.org/dist/thrift/0.12.0/thrift-0.12.0.tar.gz -O /tmp/thrift-0.12.0.tar.gz && \
-     tar xfz /tmp/thrift-0.12.0.tar.gz --directory /tmp && \
-     base_dir=`pwd` && \
-     cd /tmp/thrift-0.12.0 && \
-     ./configure --with-cpp=no --with-c_glib=no --with-java=yes --with-python=no --with-ruby=no --with-erlang=no --with-go=no --with-nodejs=no --with-php=no && \
-     make install
+  tar xfz /tmp/thrift-0.12.0.tar.gz --directory /tmp && \
+  base_dir=`pwd` && \
+  cd /tmp/thrift-0.12.0 && \
+  ./configure --with-cpp=no --with-c_glib=no --with-java=yes --with-python=no --with-ruby=no --with-erlang=no --with-go=no --with-nodejs=no --with-php=no && \
+  make install
 
-CMD ["-help"]
+RUN git clone "https://github.com/apache/pinot.git" /tmp/pinot && \
+  cd /tmp/pinot && \
+  M2_REPO=`mvn help:evaluate -Dexpression=settings.localRepository -q -DforceStdout` && \
+  VERSION=`mvn help:evaluate -Dexpression=project.version -q -DforceStdout` && \
+  echo ${VERSION} && \
+  for MODULE in `grep -r artifactId  .  | awk -F '>' '{print $2}' | awk -F '<' '{print $1}' |grep 'pinot-' |sort -u`; do  echo ${MODULE};  mkdir -p ${M2_REPO}/org/apache/pinot/${MODULE}/${VERSION};  touch ${M2_REPO}/org/apache/pinot/${MODULE}/${VERSION}/${MODULE}-${VERSION}-shaded.jar;  touch ${M2_REPO}/org/apache/pinot/${MODULE}/${VERSION}/${MODULE}-${VERSION}-tests.jar;  touch ${M2_REPO}/org/apache/pinot/${MODULE}/${VERSION}/${MODULE}-${VERSION}.jar;  touch ${M2_REPO}/org/apache/pinot/${MODULE}/${VERSION}/${MODULE}-${VERSION}.jar.lastUpdated;  touch ${M2_REPO}/org/apache/pinot/${MODULE}/${VERSION}/${MODULE}-${VERSION}.pom;  touch ${M2_REPO}/org/apache/pinot/${MODULE}/${VERSION}/_remote.repositories;  touch ${M2_REPO}/org/apache/pinot/${MODULE}/${VERSION}/resolver-status.properties;  touch ${M2_REPO}/org/apache/pinot/${MODULE}/${VERSION}/maven-metadata-local.xml; touch ${M2_REPO}/org/apache/pinot/${MODULE}/maven-metadata-local.xml; done  && \
+  for MODULE in `mvn checkstyle:check -T1C | grep maven-checkstyle-plugin| awk '{ print $(NF-1) }'`; do  echo ${MODULE};  mkdir -p ${M2_REPO}/org/apache/pinot/${MODULE}/${VERSION};  touch ${M2_REPO}/org/apache/pinot/${MODULE}/${VERSION}/${MODULE}-${VERSION}-shaded.jar;  touch ${M2_REPO}/org/apache/pinot/${MODULE}/${VERSION}/${MODULE}-${VERSION}-tests.jar;  touch ${M2_REPO}/org/apache/pinot/${MODULE}/${VERSION}/${MODULE}-${VERSION}.jar;  touch ${M2_REPO}/org/apache/pinot/${MODULE}/${VERSION}/${MODULE}-${VERSION}.jar.lastUpdated;  touch ${M2_REPO}/org/apache/pinot/${MODULE}/${VERSION}/${MODULE}-${VERSION}.pom;  touch ${M2_REPO}/org/apache/pinot/${MODULE}/${VERSION}/_remote.repositories;  touch ${M2_REPO}/org/apache/pinot/${MODULE}/${VERSION}/resolver-status.properties;  touch ${M2_REPO}/org/apache/pinot/${MODULE}/${VERSION}/maven-metadata-local.xml; touch ${M2_REPO}/org/apache/pinot/${MODULE}/maven-metadata-local.xml; done  && \
+  find ${M2_REPO} && \
+  mvn dependency:resolve -T1C &&\
+  rm -rf /tmp/pinot ${M2_REPO}/org/apache/pinot/
+
+CMD ["bash"]
