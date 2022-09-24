@@ -18,10 +18,6 @@
 #
 name: Nightly Pinot Dual Platform Docker Image Build and Publish
 
-on:
-  schedule:
-  - cron: '45 7 * * *' # run at 1:00 AM UTC
-
 jobs:
   start-runner:
     name: Start self-hosted EC2 runner
