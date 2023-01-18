@@ -42,8 +42,8 @@ DATE=`date +%Y%m%d`
 VERSION=`mvn help:evaluate -Dexpression=project.version -q -DforceStdout`
 tags=()
 if [ -z "${TAGS}" ]; then
-  tags=("${VERSION}-${COMMIT_ID}-${DATE}")
-  tags+=("latest")
+  tags=("${VERSION}-${COMMIT_ID}-${DATE}-arm64")
+  tags+=("latest-arm64")
 else
   declare -a tags=($(echo ${TAGS} | tr "," " "))
 fi
