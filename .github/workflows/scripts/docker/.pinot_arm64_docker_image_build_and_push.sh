@@ -37,21 +37,13 @@ if [ -z "${JDK_VERSION}" ]; then
   JDK_VERSION="11"
 fi
 
-# Get pinot commit id
-ROOT_DIR=`pwd`
-rm -rf /tmp/pinot
-git clone -b ${PINOT_BRANCH} --single-branch ${PINOT_GIT_URL} /tmp/pinot
-cd /tmp/pinot
 COMMIT_ID=`git rev-parse --short HEAD`
-VERSION=`mvn help:evaluate -Dexpression=project.version -q -DforceStdout`
-rm -rf /tmp/pinot
 DATE=`date +%Y%m%d`
-cd ${ROOT_DIR}
-
+VERSION=`mvn help:evaluate -Dexpression=project.version -q -DforceStdout`
 tags=()
 if [ -z "${TAGS}" ]; then
-  tags=("${VERSION}-${COMMIT_ID}-${DATE}")
-  tags+=("latest")
+  tags=("${VERSION}-${COMMIT_ID}-${DATE}-arm64")
+  tags+=("latest-arm64")
 else
   declare -a tags=($(echo ${TAGS} | tr "," " "))
 fi

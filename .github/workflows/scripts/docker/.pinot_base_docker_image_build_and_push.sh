@@ -1,3 +1,4 @@
+#!/bin/bash -x
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
@@ -17,21 +18,20 @@
 # under the License.
 #
 
-name: Cancelling Duplicates
-on:
-  workflow_run:
-    workflows: 
-      - 'Pinot Tests'
-    types: ['requested']
+if [ -z "${BUILD_PLATFORM}" ]; then
+  exit 1
+fi
 
-jobs:
-  cancel-duplicate-workflow-runs:
-    name: "Cancel duplicate workflow runs"
-    runs-on: ubuntu-latest
-    steps:
-      - uses: potiuk/cancel-workflow-runs@953e057dc81d3458935a18d1184c386b0f6b5738
-        name: "Cancel duplicate workflow runs"
-        with:
-          cancelMode: allDuplicates
-          token: ${{ secrets.GITHUB_TOKEN }}
-          sourceRunId: ${{ github.event.workflow_run.id }}
+if [ -z "${BASE_IMAGE_TYPE}" ]; then
+  exit 1
+fi
+
+cd docker/images/pinot-base/pinot-base-${BASE_IMAGE_TYPE}
+
+docker buildx build \
+    --no-cache \
+    --platform=${BUILD_PLATFORM} \
+    --file Dockerfile \
+    --tag apachepinot/pinot-base-${BASE_IMAGE_TYPE}:openjdk11 \
+    --push \
+    .
