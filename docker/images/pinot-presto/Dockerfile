@@ -43,8 +43,8 @@ USER presto
 RUN git clone ${PRESTO_GIT_URL} ${PRESTO_BUILD_DIR} && \
     cd ${PRESTO_BUILD_DIR} && \
     git checkout ${PRESTO_BRANCH} && \
-    echo "distributionUrl=https://repo1.maven.org/maven2/org/apache/maven/apache-maven/3.9.6/apache-maven-3.9.6-bin.zip" > .mvn/wrapper/maven-wrapper.properties && \
-    ./mvnw clean install -DskipTests && \
+    echo "distributionUrl=https://repo1.maven.org/maven2/org/apache/maven/apache-maven/3.6.3/apache-maven-3.6.3-bin.zip" > .mvn/wrapper/maven-wrapper.properties && \
+    MAVEN_OPTS="" ./mvnw clean install -DskipTests -T1 && \
     mkdir -p ${PRESTO_HOME}/data && \
     cp -r presto-server/target/presto-server-*/presto-server-*/* ${PRESTO_HOME} && \
     mkdir -p ${PRESTO_HOME}/plugin/pinot && cp -r presto-pinot/target/presto-pinot-*/* ${PRESTO_HOME}/plugin/pinot/ && \
