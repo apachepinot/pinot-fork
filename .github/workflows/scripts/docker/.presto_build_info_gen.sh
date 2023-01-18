@@ -1,3 +1,4 @@
+#!/bin/bash -x
 #
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
@@ -16,22 +17,26 @@
 # specific language governing permissions and limitations
 # under the License.
 #
+if [ -z "${PRESTO_GIT_URL}" ]; then
+  PRESTO_GIT_URL="https://github.com/prestodb/presto.git"
+fi
+if [ -z "${PRESTO_BRANCH}" ]; then
+  PRESTO_BRANCH="master"
+fi
 
-name: Cancelling Duplicates
-on:
-  workflow_run:
-    workflows: 
-      - 'Pinot Tests'
-    types: ['requested']
+# Get presto commit id
+ROOT_DIR=`pwd`
+rm -rf /tmp/presto
+git clone -b ${PRESTO_BRANCH} --single-branch ${PRESTO_GIT_URL} /tmp/presto
+cd /tmp/presto
+COMMIT_ID=`git rev-parse --short HEAD`
+./mvnw help:evaluate -Dexpression=project.version -q -DforceStdout
+VERSION=`./mvnw help:evaluate -Dexpression=project.version -q -DforceStdout`
+rm -rf /tmp/presto
+DATE=`date +%Y%m%d`
 
-jobs:
-  cancel-duplicate-workflow-runs:
-    name: "Cancel duplicate workflow runs"
-    runs-on: ubuntu-latest
-    steps:
-      - uses: potiuk/cancel-workflow-runs@953e057dc81d3458935a18d1184c386b0f6b5738
-        name: "Cancel duplicate workflow runs"
-        with:
-          cancelMode: allDuplicates
-          token: ${{ secrets.GITHUB_TOKEN }}
-          sourceRunId: ${{ github.event.workflow_run.id }}
+if [ -z "${TAGS}" ]; then
+  TAGS="${VERSION}-${COMMIT_ID}-${DATE},latest"
+fi
+echo "commit-id=${COMMIT_ID}" >> "$GITHUB_OUTPUT"
+echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"

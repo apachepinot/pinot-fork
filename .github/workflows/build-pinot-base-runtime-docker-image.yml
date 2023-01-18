@@ -16,20 +16,19 @@
 # specific language governing permissions and limitations
 # under the License.
 #
-name: Pinot Base Docker Image Build and Publish
+name: Pinot Base Runtime Docker Image Build and Publish
 
 on:
   workflow_dispatch:
-    inputs: { }
-
+    inputs: {}
 jobs:
-  build-pinot-build-docker-image:
-    name: Build Pinot Base Docker Image
+  build-pinot-runtime-docker-image-jdk-11-and-17:
+    name: JDK 11 and 17
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        baseImageType: [ "build", "runtime" ]
-        openJdkDist: [ "amazoncorretto", "ms-openjdk" ]
+        openJdkDist: ["amazoncorretto", "ms-openjdk"]
+        jdk_version: [11, 17]
     steps:
       - name: Login to DockerHub
         uses: docker/login-action@v2
@@ -44,7 +43,34 @@ jobs:
       - name: Build and push the Docker image
         env:
           OPEN_JDK_DIST: ${{ matrix.openJdkDist }}
-          BASE_IMAGE_TYPE: ${{ matrix.baseImageType }}
+          BASE_IMAGE_TYPE: "runtime"
           BUILD_PLATFORM: "linux/amd64,linux/arm64"
-          TAG: "11-${{ matrix.openJdkDist }}"
+          TAG: "${{matrix.jdk_version}}-${{ matrix.openJdkDist }}"
+          JDK_VERSION: ${{matrix.jdk_version}}
+        run: .github/workflows/scripts/docker/.pinot_base_docker_image_build_and_push.sh
+  build-pinot-runtime-docker-image-jdk-21:
+    name: JDK 21
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        openJdkDist: ["openjdk"]
+        jdk_version: [21]
+    steps:
+      - name: Login to DockerHub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/setup-qemu-action@v2
+        name: Set up QEMU
+      - uses: docker/setup-buildx-action@v2
+        name: Set up Docker Buildx
+      - uses: actions/checkout@v3
+      - name: Build and push the Docker image
+        env:
+          OPEN_JDK_DIST: ${{ matrix.openJdkDist }}
+          BASE_IMAGE_TYPE: "runtime"
+          BUILD_PLATFORM: "linux/amd64,linux/arm64"
+          TAG: "${{matrix.jdk_version}}-${{ matrix.openJdkDist }}"
+          JDK_VERSION: ${{matrix.jdk_version}}
         run: .github/workflows/scripts/docker/.pinot_base_docker_image_build_and_push.sh

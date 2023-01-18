@@ -58,10 +58,11 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        arch: [ "amd64", "arm64" ]
-        base-image-tag: [ "11-amazoncorretto", "11-ms-openjdk" ]
-    name: Build Pinot Docker Image on ${{ matrix.arch }} with base image ${{ matrix.base-image-tag }}
-    needs: [ generate-build-info ]
+        arch: ["amd64", "arm64"]
+        java-disto: ["amazoncorretto"]
+        java-version: ["17"]
+    name: Build Pinot Docker Image on ${{ matrix.arch }} with java disto ${{ matrix.java-disto }}
+    needs: [generate-build-info]
     steps:
       - name: Login to DockerHub
         uses: docker/login-action@v2
@@ -80,15 +81,21 @@ jobs:
           DOCKER_FILE_BASE_DIR: "docker/images/pinot"
           DOCKER_IMAGE_NAME: ${{ github.event.inputs.dockerImageName }}
           BUILD_PLATFORM: "linux/${{ matrix.arch }}"
-          BASE_IMAGE_TAG: ${{ matrix.base-image-tag }}
+          BASE_IMAGE_TAG: "11-${{ matrix.java-disto }}"
+          RUNTIME_IMAGE_TAGS: "${{ matrix.java-version }}-${{ matrix.java-disto }}"
           PINOT_GIT_URL: ${{ github.event.inputs.gitUrl }}
           PINOT_BRANCH: "${{needs.generate-build-info.outputs.commit-id}}"
           TAGS: "${{needs.generate-build-info.outputs.tags}}"
         run: .github/workflows/scripts/docker/.pinot_single_platform_docker_image_build.sh
+        timeout-minutes: 240
   create-multi-arch-manifest:
     name: Create Multi-Arch Manifest
     runs-on: ubuntu-latest
-    needs: [ generate-build-info, build-pinot-docker-image ]
+    strategy:
+      matrix:
+        java-disto: ["amazoncorretto"]
+        java-version: ["17"]
+    needs: [generate-build-info, build-pinot-docker-image]
     steps:
       - name: Login to DockerHub
         uses: docker/login-action@v2
@@ -104,5 +111,5 @@ jobs:
         env:
           TAGS: "${{needs.generate-build-info.outputs.tags}}"
           BUILD_PLATFORM: "linux/arm64,linux/amd64"
-          BASE_IMAGE_TAGS: "11-amazoncorretto,11-ms-openjdk"
+          BASE_IMAGE_TAGS: "${{ matrix.java-version }}-${{ matrix.java-disto }}"
         run: .github/workflows/scripts/docker/.pinot_multi_arch_docker_image_manifest_package.sh

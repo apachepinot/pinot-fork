@@ -1,0 +1,129 @@
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+name: Nightly Pinot Dual Platform Docker Image Build and Publish
+
+
+on:
+  workflow_dispatch:
+    inputs:
+      gitUrl:
+        description: "The Pinot git repo to check out to build, use https."
+        default: "https://github.com/apache/pinot.git"
+        required: true
+      commit:
+        description: "The branch/commit to check out to build Pinot image."
+        default: "master"
+        required: true
+      dockerImageName:
+        description: "The docker image name, default to 'apachepinot/pinot'."
+        default: "apachepinot/pinot"
+        required: true
+      tags:
+        description: "Tags to push of the image, comma separated, e.g. tag1,tag2,tag3"
+        default: ""
+jobs:
+  generate-build-info:
+    name: Generate Build Info
+    runs-on: ubuntu-latest
+    outputs:
+      commit-id: ${{ steps.generate-build-info.outputs.commit-id }}
+      tags: ${{ steps.generate-build-info.outputs.tags }}
+    steps:
+    - uses: actions/checkout@v3
+    - name: Generate Build Info
+      id: generate-build-info
+      env:
+        PINOT_GIT_URL: ${{ github.event.inputs.gitUrl }}
+        PINOT_BRANCH: ${{ github.event.inputs.commit }}
+        TAGS: ${{ github.event.inputs.tags }}
+      run: |
+        .github/workflows/scripts/docker/.pinot_build_info_gen.sh
+  start-runner:
+    name: Start self-hosted EC2 runner
+    runs-on: ubuntu-latest
+    needs:
+      - generate-build-info
+    outputs:
+      label: ${{ steps.start-ec2-runner.outputs.label }}
+      ec2-instance-id: ${{ steps.start-ec2-runner.outputs.ec2-instance-id }}
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      - name: Start EC2 runner
+        id: start-ec2-runner
+        uses: machulav/ec2-github-runner@v2
+        with:
+          mode: start
+          github-token: ${{ secrets.GH_TOKEN }}
+          ec2-image-id: ami-026cd9fe9107d2cec
+          ec2-instance-type: r7g.4xlarge
+          subnet-id: subnet-09e872c39e4e17454
+          security-group-id: sg-04f59292c7270c5a3
+  build-pinot-docker-image:
+    name: Build Pinot Docker Image
+    needs:
+      - generate-build-info # required to get output from the generate-build-info job
+      - start-runner # required to get output from the start-runner job
+    runs-on: ${{ needs.start-runner.outputs.label }}
+    steps:
+    - name: Login to DockerHub
+      uses: docker/login-action@v2
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+    - uses: docker/setup-qemu-action@v2
+      name: Set up QEMU
+    - uses: docker/setup-buildx-action@v2
+      name: Set up Docker Buildx
+    - uses: actions/checkout@v3
+    - name: Build and push the Docker image
+      env:
+        DOCKER_FILE_BASE_DIR: "docker/images/pinot"
+        DOCKER_IMAGE_NAME: ${{ github.event.inputs.dockerImageName }}
+        BUILD_PLATFORM: "linux/arm64"
+        PINOT_GIT_URL: ${{ github.event.inputs.gitUrl }}
+        PINOT_BRANCH: "${{needs.generate-build-info.outputs.commit-id}}"
+        TAGS: "${{needs.generate-build-info.outputs.tags}}"
+      run: .github/workflows/scripts/docker/.pinot_single_platform_docker_image_build.sh
+  stop-runner:
+    name: Stop self-hosted EC2 runner
+    needs:
+      - generate-build-info
+      - start-runner # required to get output from the start-runner job
+      - build-pinot-docker-image # required to wait when the main job is done
+    runs-on: ubuntu-latest
+    if: ${{ always() }} # required to stop the runner even if the error happened in the previous jobs
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      - name: Stop EC2 runner
+        uses: machulav/ec2-github-runner@v2
+        with:
+          mode: stop
+          github-token: ${{ secrets.GH_TOKEN }}
+          label: ${{ needs.start-runner.outputs.label }}
+          ec2-instance-id: ${{ needs.start-runner.outputs.ec2-instance-id }}
