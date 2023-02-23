@@ -155,7 +155,7 @@
     <netty.version>4.1.79.Final</netty.version>
     <reactivestreams.version>1.0.3</reactivestreams.version>
     <jts.version>1.16.1</jts.version>
-    <h3.version>4.0.0</h3.version>
+    <h3.version>4.1.1</h3.version>
     <jmh.version>1.26</jmh.version>
     <audienceannotations.version>0.13.0</audienceannotations.version>
 
@@ -167,8 +167,8 @@
     To change kafka connector dependency, we only need to update this version number config.
     TODO: figure out a way to inject kafka dependency instead of explicitly setting the kafka module dependency -->
     <kafka.version>2.0</kafka.version>
-    <protobuf.version>3.19.2</protobuf.version>
-    <grpc.version>1.41.0</grpc.version>
+    <protobuf.version>3.22.0</protobuf.version>
+    <grpc.version>1.53.0</grpc.version>
     <confluent.version>5.5.3</confluent.version>
 
     <!-- Checkstyle violation prop.-->
@@ -886,7 +886,7 @@
       <dependency>
         <groupId>org.apache.datasketches</groupId>
         <artifactId>datasketches-java</artifactId>
-        <version>1.2.0-incubating</version>
+        <version>3.3.0</version>
       </dependency>
       <dependency>
         <groupId>com.tdunning</groupId>

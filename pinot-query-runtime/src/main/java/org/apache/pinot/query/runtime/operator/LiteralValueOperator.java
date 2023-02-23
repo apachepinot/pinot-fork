@@ -25,6 +25,7 @@ import javax.annotation.Nullable;
 import org.apache.pinot.common.datablock.DataBlock;
 import org.apache.pinot.common.utils.DataSchema;
 import org.apache.pinot.query.planner.logical.RexExpression;
+import org.apache.pinot.query.routing.VirtualServerAddress;
 import org.apache.pinot.query.runtime.blocks.TransferableBlock;
 import org.apache.pinot.query.runtime.blocks.TransferableBlockUtils;
 import org.slf4j.Logger;
@@ -39,12 +40,10 @@ public class LiteralValueOperator extends MultiStageOperator {
   private final TransferableBlock _rexLiteralBlock;
   private boolean _isLiteralBlockReturned;
 
-  private OperatorStats _operatorStats;
-
   public LiteralValueOperator(DataSchema dataSchema, List<List<RexExpression>> rexLiteralRows,
-      long requestId, int stageId) {
+      long requestId, int stageId, VirtualServerAddress serverAddress) {
+    super(requestId, stageId, serverAddress);
     _dataSchema = dataSchema;
-    _operatorStats = new OperatorStats(requestId, stageId, EXPLAIN_NAME);
     _rexLiteralBlock = constructBlock(rexLiteralRows);
     _isLiteralBlockReturned = false;
   }
@@ -57,22 +56,16 @@ public class LiteralValueOperator extends MultiStageOperator {
   @Nullable
   @Override
   public String toExplainString() {
-    LOGGER.debug(_operatorStats.toString());
     return EXPLAIN_NAME;
   }
 
   @Override
   protected TransferableBlock getNextBlock() {
-    try {
-      _operatorStats.startTimer();
-      if (!_isLiteralBlockReturned) {
-        _isLiteralBlockReturned = true;
-        return _rexLiteralBlock;
-      } else {
-        return TransferableBlockUtils.getEndOfStreamTransferableBlock();
-      }
-    } finally {
-      _operatorStats.endTimer();
+    if (!_isLiteralBlockReturned) {
+      _isLiteralBlockReturned = true;
+      return _rexLiteralBlock;
+    } else {
+      return TransferableBlockUtils.getEndOfStreamTransferableBlock();
     }
   }
 
@@ -85,8 +78,6 @@ public class LiteralValueOperator extends MultiStageOperator {
       }
       blockContent.add(row);
     }
-    _operatorStats.recordInput(1, blockContent.size());
-    _operatorStats.recordOutput(1, blockContent.size());
     return new TransferableBlock(blockContent, _dataSchema, DataBlock.Type.ROW);
   }
 }

@@ -22,10 +22,13 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import it.unimi.dsi.fastutil.objects.ObjectOpenHashSet;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import javax.annotation.Nullable;
@@ -33,6 +36,7 @@ import org.apache.pinot.common.datablock.DataBlock;
 import org.apache.pinot.common.utils.DataSchema;
 import org.apache.pinot.core.data.table.Key;
 import org.apache.pinot.query.planner.logical.RexExpression;
+import org.apache.pinot.query.routing.VirtualServerAddress;
 import org.apache.pinot.query.runtime.blocks.TransferableBlock;
 import org.apache.pinot.query.runtime.blocks.TransferableBlockUtils;
 import org.apache.pinot.segment.local.customobject.PinotFourthMoment;
@@ -73,23 +77,23 @@ public class AggregateOperator extends MultiStageOperator {
   private boolean _readyToConstruct;
   private boolean _hasReturnedAggregateBlock;
 
-  // TODO: Move to OperatorContext class.
-  private OperatorStats _operatorStats;
-
   // TODO: refactor Pinot Reducer code to support the intermediate stage agg operator.
   // aggCalls has to be a list of FunctionCall and cannot be null
   // groupSet has to be a list of InputRef and cannot be null
   // TODO: Add these two checks when we confirm we can handle error in upstream ctor call.
   public AggregateOperator(MultiStageOperator inputOperator, DataSchema dataSchema, List<RexExpression> aggCalls,
-      List<RexExpression> groupSet, DataSchema inputSchema, long requestId, int stageId) {
+      List<RexExpression> groupSet, DataSchema inputSchema, long requestId, int stageId,
+      VirtualServerAddress virtualServerAddress) {
     this(inputOperator, dataSchema, aggCalls, groupSet, inputSchema, AggregateOperator.Accumulator.MERGERS, requestId,
-        stageId);
+        stageId, virtualServerAddress);
   }
 
   @VisibleForTesting
   AggregateOperator(MultiStageOperator inputOperator, DataSchema dataSchema, List<RexExpression> aggCalls,
       List<RexExpression> groupSet, DataSchema inputSchema,
-      Map<String, Function<DataSchema.ColumnDataType, Merger>> mergers, long requestId, int stageId) {
+      Map<String, Function<DataSchema.ColumnDataType, Merger>> mergers, long requestId, int stageId,
+      VirtualServerAddress serverAddress) {
+    super(requestId, stageId, serverAddress);
     _inputOperator = inputOperator;
     _groupSet = groupSet;
     _upstreamErrorBlock = null;
@@ -111,7 +115,6 @@ public class AggregateOperator extends MultiStageOperator {
     _resultSchema = dataSchema;
     _readyToConstruct = false;
     _hasReturnedAggregateBlock = false;
-    _operatorStats = new OperatorStats(requestId, stageId, EXPLAIN_NAME);
   }
 
   @Override
@@ -122,15 +125,11 @@ public class AggregateOperator extends MultiStageOperator {
   @Nullable
   @Override
   public String toExplainString() {
-    // TODO: move to close call;
-    _inputOperator.toExplainString();
-    LOGGER.debug(_operatorStats.toString());
     return EXPLAIN_NAME;
   }
 
   @Override
   protected TransferableBlock getNextBlock() {
-    _operatorStats.startTimer();
     try {
       if (!_readyToConstruct && !consumeInputBlocks()) {
         return TransferableBlockUtils.getNoOpTransferableBlock();
@@ -148,8 +147,6 @@ public class AggregateOperator extends MultiStageOperator {
       }
     } catch (Exception e) {
       return TransferableBlockUtils.getErrorTransferableBlock(e);
-    } finally {
-      _operatorStats.endTimer();
     }
   }
 
@@ -164,22 +161,35 @@ public class AggregateOperator extends MultiStageOperator {
       }
       rows.add(row);
     }
+
     _hasReturnedAggregateBlock = true;
     if (rows.size() == 0) {
-      return TransferableBlockUtils.getEndOfStreamTransferableBlock();
+      if (_groupSet.size() == 0) {
+        return constructEmptyAggResultBlock();
+      } else {
+        return TransferableBlockUtils.getEndOfStreamTransferableBlock();
+      }
     } else {
-      _operatorStats.recordOutput(1, rows.size());
       return new TransferableBlock(rows, _resultSchema, DataBlock.Type.ROW);
     }
+  }
+
+  /**
+   * @return an empty agg result block for non-group-by aggregation.
+   */
+  private TransferableBlock constructEmptyAggResultBlock() {
+    Object[] row = new Object[_aggCalls.size()];
+    for (int i = 0; i < _accumulators.length; i++) {
+      row[i] = _accumulators[i]._merger.initialize(null, _accumulators[i]._dataType);
+    }
+    return new TransferableBlock(Collections.singletonList(row), _resultSchema, DataBlock.Type.ROW);
   }
 
   /**
    * @return whether or not the operator is ready to move on (EOS or ERROR)
    */
   private boolean consumeInputBlocks() {
-    _operatorStats.endTimer();
     TransferableBlock block = _inputOperator.nextBlock();
-    _operatorStats.startTimer();
     while (!block.isNoOpBlock()) {
       // setting upstream error block
       if (block.isErrorBlock()) {
@@ -198,10 +208,7 @@ public class AggregateOperator extends MultiStageOperator {
           _accumulators[i].accumulate(key, row);
         }
       }
-      _operatorStats.recordInput(1, container.size());
-      _operatorStats.endTimer();
       block = _inputOperator.nextBlock();
-      _operatorStats.startTimer();
     }
     return false;
   }
@@ -256,7 +263,7 @@ public class AggregateOperator extends MultiStageOperator {
     }
 
     @Override
-    public Object initialize(Object other) {
+    public Object initialize(Object other, DataSchema.ColumnDataType dataType) {
       PinotFourthMoment moment = new PinotFourthMoment();
       moment.increment(((Number) other).doubleValue());
       return moment;
@@ -273,16 +280,44 @@ public class AggregateOperator extends MultiStageOperator {
     }
   }
 
+  private static class MergeCountDistinctScalars implements Merger {
+    @SuppressWarnings("unchecked")
+    @Override
+    public Object merge(Object agg, Object value) {
+      // TODO: this casts everything to `Set<?>` instead of using the primitive version (e.g. IntSet)
+      ((Set<Object>) agg).add(value);
+      return agg;
+    }
+
+    @Override
+    public Object initialize(Object other, DataSchema.ColumnDataType dataType) {
+      ObjectOpenHashSet<Object> set = new ObjectOpenHashSet<>();
+      set.add(other);
+      return set;
+    }
+  }
+
+  private static class MergeCountDistinctSets implements Merger {
+
+    @SuppressWarnings("unchecked")
+    @Override
+    public Object merge(Object agg, Object value) {
+      // TODO: this casts everything to `Set<?>` instead of using the primitive version (e.g. IntSet)
+      ((Set<Object>) agg).addAll((Set<Object>) value);
+      return agg;
+    }
+  }
+
   interface Merger {
     /**
      * Initializes the merger based on the first input
      */
-    default Object initialize(Object other) {
-      return other;
+    default Object initialize(Object other, DataSchema.ColumnDataType dataType) {
+      return other == null ? dataType.getNullPlaceholder() : other;
     }
 
     /**
-     * Merges the existing aggregate (the result of {@link #initialize(Object)}) with
+     * Merges the existing aggregate (the result of {@link #initialize(Object, DataSchema.ColumnDataType)}) with
      * the new value coming in (which may be an aggregate in and of itself).
      */
     Object merge(Object agg, Object value);
@@ -301,45 +336,53 @@ public class AggregateOperator extends MultiStageOperator {
             .put("$BOOL_AND0", cdt -> AggregateOperator::mergeBoolAnd)
             .put("BOOL_OR", cdt -> AggregateOperator::mergeBoolOr)
             .put("$BOOL_OR", cdt -> AggregateOperator::mergeBoolOr)
-            .put("$BOOL_OR0", cdt -> AggregateOperator::mergeBoolOr).put("FOURTHMOMENT",
+            .put("$BOOL_OR0", cdt -> AggregateOperator::mergeBoolOr)
+            .put("FOURTHMOMENT",
                 cdt -> cdt == DataSchema.ColumnDataType.OBJECT ? new MergeFourthMomentObject()
-                    : new MergeFourthMomentNumeric()).put("$FOURTHMOMENT",
+                    : new MergeFourthMomentNumeric())
+            .put("$FOURTHMOMENT",
                 cdt -> cdt == DataSchema.ColumnDataType.OBJECT ? new MergeFourthMomentObject()
-                    : new MergeFourthMomentNumeric()).put("$FOURTHMOMENT0",
+                    : new MergeFourthMomentNumeric())
+            .put("$FOURTHMOMENT0",
                 cdt -> cdt == DataSchema.ColumnDataType.OBJECT ? new MergeFourthMomentObject()
-                    : new MergeFourthMomentNumeric()).build();
+                    : new MergeFourthMomentNumeric())
+            .put("DISTINCTCOUNT", cdt -> cdt == DataSchema.ColumnDataType.OBJECT
+                ? new MergeCountDistinctSets() : new MergeCountDistinctScalars())
+            .put("$DISTINCTCOUNT", cdt -> cdt == DataSchema.ColumnDataType.OBJECT
+                ? new MergeCountDistinctSets() : new MergeCountDistinctScalars())
+            .put("$DISTINCTCOUNT0", cdt -> cdt == DataSchema.ColumnDataType.OBJECT
+                ? new MergeCountDistinctSets() : new MergeCountDistinctScalars())
+            .build();
 
     final int _inputRef;
     final Object _literal;
     final Map<Key, Object> _results = new HashMap<>();
     final Merger _merger;
+    final DataSchema.ColumnDataType _dataType;
 
     Accumulator(RexExpression.FunctionCall aggCall, Map<String, Function<DataSchema.ColumnDataType, Merger>> merger,
         String functionName, DataSchema inputSchema) {
       // agg function operand should either be a InputRef or a Literal
-      DataSchema.ColumnDataType dataType;
       RexExpression rexExpression = toAggregationFunctionOperand(aggCall);
       if (rexExpression instanceof RexExpression.InputRef) {
         _inputRef = ((RexExpression.InputRef) rexExpression).getIndex();
         _literal = null;
-        dataType = inputSchema.getColumnDataType(_inputRef);
+        _dataType = inputSchema.getColumnDataType(_inputRef);
       } else {
         _inputRef = -1;
         _literal = ((RexExpression.Literal) rexExpression).getValue();
-        dataType = DataSchema.ColumnDataType.fromDataType(rexExpression.getDataType(), false);
+        _dataType = DataSchema.ColumnDataType.fromDataType(rexExpression.getDataType(), true);
       }
-      _merger = merger.get(functionName).apply(dataType);
+      _merger = merger.get(functionName).apply(_dataType);
     }
 
     void accumulate(Key key, Object[] row) {
-      Map<Key, Object> keys = _results;
-
       // TODO: fix that single agg result (original type) has different type from multiple agg results (double).
-      Object currentRes = keys.get(key);
+      Object currentRes = _results.get(key);
       Object value = _inputRef == -1 ? _literal : row[_inputRef];
 
       if (currentRes == null) {
-        keys.put(key, _merger.initialize(value));
+        _results.put(key, _merger.initialize(value, _dataType));
       } else {
         Object mergedResult = _merger.merge(currentRes, value);
         _results.put(key, mergedResult);

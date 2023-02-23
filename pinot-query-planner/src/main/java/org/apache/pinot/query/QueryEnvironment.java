@@ -35,6 +35,7 @@ import org.apache.calcite.prepare.Prepare;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.RelRoot;
 import org.apache.calcite.rel.hint.HintStrategyTable;
+import org.apache.calcite.rel.hint.PinotHintStrategyTable;
 import org.apache.calcite.rel.rules.PinotQueryRuleSets;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rex.RexBuilder;
@@ -102,6 +103,7 @@ public class QueryEnvironment {
         .defaultSchema(_rootSchema.plus())
         .sqlToRelConverterConfig(SqlToRelConverter.config()
             .withHintStrategyTable(getHintStrategyTable())
+            .withTrimUnusedFields(true)
             // SUB-QUERY Threshold is useless as we are encoding all IN clause in-line anyway
             .withInSubQueryThreshold(Integer.MAX_VALUE)
             .addRelBuilderConfigTransform(c -> c.withPushJoinCondition(true))
@@ -210,7 +212,8 @@ public class QueryEnvironment {
     SqlToRelConverter sqlToRelConverter =
         new SqlToRelConverter(plannerContext.getPlanner(), plannerContext.getValidator(), _catalogReader, cluster,
             StandardConvertletTable.INSTANCE, _config.getSqlToRelConverterConfig());
-    return sqlToRelConverter.convertQuery(parsed, false, true);
+    RelRoot relRoot = sqlToRelConverter.convertQuery(parsed, false, true);
+    return relRoot.withRel(sqlToRelConverter.trimUnusedFields(false, relRoot.rel));
   }
 
   private RelNode optimize(RelRoot relRoot, PlannerContext plannerContext) {
@@ -236,6 +239,6 @@ public class QueryEnvironment {
   // --------------------------------------------------------------------------
 
   private HintStrategyTable getHintStrategyTable() {
-    return HintStrategyTable.builder().build();
+    return PinotHintStrategyTable.PINOT_HINT_STRATEGY_TABLE;
   }
 }

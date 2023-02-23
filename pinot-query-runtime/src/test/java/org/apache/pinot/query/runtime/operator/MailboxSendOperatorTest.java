@@ -27,6 +27,7 @@ import org.apache.pinot.query.mailbox.JsonMailboxIdentifier;
 import org.apache.pinot.query.mailbox.MailboxService;
 import org.apache.pinot.query.planner.partitioning.KeySelector;
 import org.apache.pinot.query.routing.VirtualServer;
+import org.apache.pinot.query.routing.VirtualServerAddress;
 import org.apache.pinot.query.runtime.blocks.TransferableBlock;
 import org.apache.pinot.query.runtime.blocks.TransferableBlockUtils;
 import org.apache.pinot.query.runtime.operator.exchange.BlockExchange;
@@ -39,7 +40,11 @@ import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
+
 public class MailboxSendOperatorTest {
+
+  private static final int DEFAULT_SENDER_STAGE_ID = 0;
+  private static final int DEFAULT_RECEIVER_STAGE_ID = 1;
 
   private AutoCloseable _mocks;
 
@@ -61,6 +66,10 @@ public class MailboxSendOperatorTest {
     _mocks = MockitoAnnotations.openMocks(this);
     Mockito.when(_exchangeFactory.build(Mockito.any(), Mockito.any(), Mockito.any(), Mockito.any(), Mockito.any()))
         .thenReturn(_exchange);
+
+    Mockito.when(_server.getHostname()).thenReturn("mock");
+    Mockito.when(_server.getQueryMailboxPort()).thenReturn(0);
+    Mockito.when(_server.getVirtualId()).thenReturn(0);
   }
 
   @AfterMethod
@@ -72,11 +81,12 @@ public class MailboxSendOperatorTest {
   @Test
   public void shouldSwallowNoOpBlockFromUpstream() {
     // Given:
-    MailboxSendOperator operator = new MailboxSendOperator(
-        _mailboxService, _input, ImmutableList.of(_server), RelDistribution.Type.HASH_DISTRIBUTED, _selector,
-        server -> new JsonMailboxIdentifier("123", "0@from:1", "0@to:2"), _exchangeFactory, 1, 2);
-    Mockito.when(_input.nextBlock())
-        .thenReturn(TransferableBlockUtils.getNoOpTransferableBlock());
+    MailboxSendOperator operator = new MailboxSendOperator(_mailboxService, _input, ImmutableList.of(_server),
+        RelDistribution.Type.HASH_DISTRIBUTED, _selector,
+        server -> new JsonMailboxIdentifier("123", "0@from:1", "0@to:2", DEFAULT_SENDER_STAGE_ID,
+            DEFAULT_RECEIVER_STAGE_ID), _exchangeFactory, 1, DEFAULT_SENDER_STAGE_ID, DEFAULT_RECEIVER_STAGE_ID,
+        new VirtualServerAddress(_server));
+    Mockito.when(_input.nextBlock()).thenReturn(TransferableBlockUtils.getNoOpTransferableBlock());
 
     // When:
     TransferableBlock block = operator.nextBlock();
@@ -89,12 +99,13 @@ public class MailboxSendOperatorTest {
   @Test
   public void shouldSendErrorBlock() {
     // Given:
-    MailboxSendOperator operator = new MailboxSendOperator(
-        _mailboxService, _input, ImmutableList.of(_server), RelDistribution.Type.HASH_DISTRIBUTED, _selector,
-        server -> new JsonMailboxIdentifier("123", "0@from:1", "0@to:2"), _exchangeFactory, 1, 2);
+    MailboxSendOperator operator = new MailboxSendOperator(_mailboxService, _input, ImmutableList.of(_server),
+        RelDistribution.Type.HASH_DISTRIBUTED, _selector,
+        server -> new JsonMailboxIdentifier("123", "0@from:1", "0@to:2", DEFAULT_SENDER_STAGE_ID,
+            DEFAULT_RECEIVER_STAGE_ID), _exchangeFactory, 1, DEFAULT_SENDER_STAGE_ID, DEFAULT_RECEIVER_STAGE_ID,
+        new VirtualServerAddress(_server));
     TransferableBlock errorBlock = TransferableBlockUtils.getErrorTransferableBlock(new Exception("foo!"));
-    Mockito.when(_input.nextBlock())
-        .thenReturn(errorBlock);
+    Mockito.when(_input.nextBlock()).thenReturn(errorBlock);
 
     // When:
     TransferableBlock block = operator.nextBlock();
@@ -107,11 +118,12 @@ public class MailboxSendOperatorTest {
   @Test
   public void shouldSendErrorBlockWhenInputThrows() {
     // Given:
-    MailboxSendOperator operator = new MailboxSendOperator(
-        _mailboxService, _input, ImmutableList.of(_server), RelDistribution.Type.HASH_DISTRIBUTED, _selector,
-        server -> new JsonMailboxIdentifier("123", "0@from:1", "0@to:2"), _exchangeFactory, 1, 2);
-    Mockito.when(_input.nextBlock())
-        .thenThrow(new RuntimeException("foo!"));
+    MailboxSendOperator operator = new MailboxSendOperator(_mailboxService, _input, ImmutableList.of(_server),
+        RelDistribution.Type.HASH_DISTRIBUTED, _selector,
+        server -> new JsonMailboxIdentifier("123", "0@from:1", "0@to:2", DEFAULT_SENDER_STAGE_ID,
+            DEFAULT_RECEIVER_STAGE_ID), _exchangeFactory, 1, DEFAULT_SENDER_STAGE_ID, DEFAULT_RECEIVER_STAGE_ID,
+        new VirtualServerAddress(_server));
+    Mockito.when(_input.nextBlock()).thenThrow(new RuntimeException("foo!"));
     ArgumentCaptor<TransferableBlock> captor = ArgumentCaptor.forClass(TransferableBlock.class);
 
     // When:
@@ -126,12 +138,13 @@ public class MailboxSendOperatorTest {
   @Test
   public void shouldSendEosBlock() {
     // Given:
-    MailboxSendOperator operator = new MailboxSendOperator(
-        _mailboxService, _input, ImmutableList.of(_server), RelDistribution.Type.HASH_DISTRIBUTED, _selector,
-        server -> new JsonMailboxIdentifier("123", "0@from:1", "0@to:2"), _exchangeFactory, 1, 2);
+    MailboxSendOperator operator = new MailboxSendOperator(_mailboxService, _input, ImmutableList.of(_server),
+        RelDistribution.Type.HASH_DISTRIBUTED, _selector,
+        server -> new JsonMailboxIdentifier("123", "0@from:1", "0@to:2", DEFAULT_SENDER_STAGE_ID,
+            DEFAULT_RECEIVER_STAGE_ID), _exchangeFactory, 1, DEFAULT_SENDER_STAGE_ID, DEFAULT_RECEIVER_STAGE_ID,
+        new VirtualServerAddress(_server));
     TransferableBlock eosBlock = TransferableBlockUtils.getEndOfStreamTransferableBlock();
-    Mockito.when(_input.nextBlock())
-        .thenReturn(eosBlock);
+    Mockito.when(_input.nextBlock()).thenReturn(eosBlock);
 
     // When:
     TransferableBlock block = operator.nextBlock();
@@ -144,12 +157,13 @@ public class MailboxSendOperatorTest {
   @Test
   public void shouldSendDataBlock() {
     // Given:
-    MailboxSendOperator operator = new MailboxSendOperator(
-        _mailboxService, _input, ImmutableList.of(_server), RelDistribution.Type.HASH_DISTRIBUTED, _selector,
-        server -> new JsonMailboxIdentifier("123", "0@from:1", "0@to:2"), _exchangeFactory, 1, 2);
+    MailboxSendOperator operator = new MailboxSendOperator(_mailboxService, _input, ImmutableList.of(_server),
+        RelDistribution.Type.HASH_DISTRIBUTED, _selector,
+        server -> new JsonMailboxIdentifier("123", "0@from:1", "0@to:2", DEFAULT_SENDER_STAGE_ID,
+            DEFAULT_RECEIVER_STAGE_ID), _exchangeFactory, 1, DEFAULT_SENDER_STAGE_ID, DEFAULT_RECEIVER_STAGE_ID,
+        new VirtualServerAddress(_server));
     TransferableBlock dataBlock = block(new DataSchema(new String[]{}, new DataSchema.ColumnDataType[]{}));
-    Mockito.when(_input.nextBlock())
-        .thenReturn(dataBlock)
+    Mockito.when(_input.nextBlock()).thenReturn(dataBlock)
         .thenReturn(TransferableBlockUtils.getNoOpTransferableBlock());
 
     // When:

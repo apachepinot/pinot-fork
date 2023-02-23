@@ -19,7 +19,11 @@
 package org.apache.pinot.query.runtime.operator;
 
 import com.google.common.base.Stopwatch;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import org.apache.pinot.query.routing.VirtualServerAddress;
+import org.apache.pinot.query.runtime.operator.utils.OperatorUtils;
 
 
 public class OperatorStats {
@@ -28,20 +32,20 @@ public class OperatorStats {
   // TODO: add a operatorId for better tracking purpose.
   private final int _stageId;
   private final long _requestId;
+  private final VirtualServerAddress _serverAddress;
 
   private final String _operatorType;
 
-  private int _numInputBlock = 0;
-  private int _numInputRows = 0;
+  private int _numBlock = 0;
+  private int _numRows = 0;
+  private Map<String, String> _executionStats;
 
-  private int _numOutputBlock = 0;
-
-  private int _numOutputRows = 0;
-
-  public OperatorStats(long requestId, int stageId, String operatorType) {
+  public OperatorStats(long requestId, int stageId, VirtualServerAddress serverAddress, String operatorType) {
     _stageId = stageId;
     _requestId = requestId;
+    _serverAddress = serverAddress;
     _operatorType = operatorType;
+    _executionStats = new HashMap<>();
   }
 
   public void startTimer() {
@@ -56,23 +60,41 @@ public class OperatorStats {
     }
   }
 
-  public void recordInput(int numBlock, int numRows) {
-    _numInputBlock += numBlock;
-    _numInputRows += numRows;
+  public void recordRow(int numBlock, int numRows) {
+    _numBlock += numBlock;
+    _numRows += numRows;
   }
 
-  public void recordOutput(int numBlock, int numRows) {
-    _numOutputBlock += numBlock;
-    _numOutputRows += numRows;
+  public void recordExecutionStats(Map<String, String> executionStats) {
+    _executionStats = executionStats;
   }
 
-  // TODO: Return the string as a JSON string.
+  public Map<String, String> getExecutionStats() {
+    _executionStats.put(OperatorUtils.NUM_BLOCKS, String.valueOf(_numBlock));
+    _executionStats.put(OperatorUtils.NUM_ROWS, String.valueOf(_numRows));
+    _executionStats.put(OperatorUtils.THREAD_EXECUTION_TIME,
+        String.valueOf(_executeStopwatch.elapsed(TimeUnit.MILLISECONDS)));
+    return _executionStats;
+  }
+
+  public int getStageId() {
+    return _stageId;
+  }
+
+  public long getRequestId() {
+    return _requestId;
+  }
+
+  public VirtualServerAddress getServerAddress() {
+    return _serverAddress;
+  }
+
+  public String getOperatorType() {
+    return _operatorType;
+  }
+
   @Override
   public String toString() {
-    return String.format(
-        "OperatorStats[type: %s, requestId: %s, stageId %s] ExecutionWallTime: %sms, InputRows: %s, InputBlock: "
-            + "%s, OutputRows: %s, OutputBlock: %s", _operatorType, _requestId, _stageId,
-        _executeStopwatch.elapsed(TimeUnit.MILLISECONDS), _numInputRows, _numInputBlock, _numOutputRows,
-        _numOutputBlock);
+    return OperatorUtils.operatorStatsToJson(this);
   }
 }

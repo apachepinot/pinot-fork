@@ -35,6 +35,7 @@ import org.apache.pinot.core.data.table.Key;
 import org.apache.pinot.query.planner.logical.RexExpression;
 import org.apache.pinot.query.planner.partitioning.KeySelector;
 import org.apache.pinot.query.planner.stage.JoinNode;
+import org.apache.pinot.query.routing.VirtualServerAddress;
 import org.apache.pinot.query.runtime.blocks.TransferableBlock;
 import org.apache.pinot.query.runtime.blocks.TransferableBlockUtils;
 import org.apache.pinot.query.runtime.operator.operands.TransformOperand;
@@ -60,8 +61,8 @@ public class HashJoinOperator extends MultiStageOperator {
   private static final String EXPLAIN_NAME = "HASH_JOIN";
   private static final Logger LOGGER = LoggerFactory.getLogger(AggregateOperator.class);
 
-  private static final Set<JoinRelType> SUPPORTED_JOIN_TYPES =
-      ImmutableSet.of(JoinRelType.INNER, JoinRelType.LEFT, JoinRelType.RIGHT, JoinRelType.FULL);
+  private static final Set<JoinRelType> SUPPORTED_JOIN_TYPES = ImmutableSet.of(
+      JoinRelType.INNER, JoinRelType.LEFT, JoinRelType.RIGHT, JoinRelType.FULL, JoinRelType.SEMI, JoinRelType.ANTI);
 
   private final HashMap<Key, List<Object[]>> _broadcastRightTable;
 
@@ -87,10 +88,9 @@ public class HashJoinOperator extends MultiStageOperator {
   private KeySelector<Object[], Object[]> _leftKeySelector;
   private KeySelector<Object[], Object[]> _rightKeySelector;
 
-  private OperatorStats _operatorStats;
-
   public HashJoinOperator(MultiStageOperator leftTableOperator, MultiStageOperator rightTableOperator,
-      DataSchema leftSchema, JoinNode node, long requestId, int stageId) {
+      DataSchema leftSchema, JoinNode node, long requestId, int stageId, VirtualServerAddress serverAddress) {
+    super(requestId, stageId, serverAddress);
     Preconditions.checkState(SUPPORTED_JOIN_TYPES.contains(node.getJoinRelType()),
         "Join type: " + node.getJoinRelType() + " is not supported!");
     _joinType = node.getJoinRelType();
@@ -102,8 +102,8 @@ public class HashJoinOperator extends MultiStageOperator {
     Preconditions.checkState(_leftRowSize > 0, "leftRowSize has to be greater than zero:" + _leftRowSize);
     _resultSchema = node.getDataSchema();
     _resultRowSize = _resultSchema.size();
-    Preconditions.checkState(_resultRowSize > _leftRowSize,
-        "Result row size" + _leftRowSize + " has to be greater than left row size:" + _leftRowSize);
+    Preconditions.checkState(_resultRowSize >= _leftRowSize,
+        "Result row size" + _leftRowSize + " has to be greater than or equal to left row size:" + _leftRowSize);
     _leftTableOperator = leftTableOperator;
     _rightTableOperator = rightTableOperator;
     _joinClauseEvaluators = new ArrayList<>(node.getJoinClauses().size());
@@ -118,7 +118,6 @@ public class HashJoinOperator extends MultiStageOperator {
       _matchedRightRows = null;
     }
     _upstreamErrorBlock = null;
-    _operatorStats = new OperatorStats(requestId, stageId, EXPLAIN_NAME);
   }
 
   // TODO: Separate left and right table operator.
@@ -130,15 +129,11 @@ public class HashJoinOperator extends MultiStageOperator {
   @Nullable
   @Override
   public String toExplainString() {
-    _leftTableOperator.toExplainString();
-    _rightTableOperator.toExplainString();
-    LOGGER.debug(_operatorStats.toString());
     return EXPLAIN_NAME;
   }
 
   @Override
   protected TransferableBlock getNextBlock() {
-    _operatorStats.startTimer();
     try {
       if (_isTerminated) {
         return TransferableBlockUtils.getEndOfStreamTransferableBlock();
@@ -152,22 +147,16 @@ public class HashJoinOperator extends MultiStageOperator {
       } else if (!_isHashTableBuilt) {
         return TransferableBlockUtils.getNoOpTransferableBlock();
       }
-      _operatorStats.endTimer();
       TransferableBlock leftBlock = _leftTableOperator.nextBlock();
-      _operatorStats.startTimer();
       // JOIN each left block with the right block.
       return buildJoinedDataBlock(leftBlock);
     } catch (Exception e) {
       return TransferableBlockUtils.getErrorTransferableBlock(e);
-    } finally {
-      _operatorStats.endTimer();
     }
   }
 
   private void buildBroadcastHashTable() {
-    _operatorStats.endTimer();
     TransferableBlock rightBlock = _rightTableOperator.nextBlock();
-    _operatorStats.startTimer();
     while (!rightBlock.isNoOpBlock()) {
       if (rightBlock.isErrorBlock()) {
         _upstreamErrorBlock = rightBlock;
@@ -184,10 +173,7 @@ public class HashJoinOperator extends MultiStageOperator {
             _broadcastRightTable.computeIfAbsent(new Key(_rightKeySelector.getKey(row)), k -> new ArrayList<>());
         hashCollection.add(row);
       }
-      _operatorStats.recordInput(1, container.size());
-      _operatorStats.endTimer();
       rightBlock = _rightTableOperator.nextBlock();
-      _operatorStats.startTimer();
     }
   }
 
@@ -198,6 +184,13 @@ public class HashJoinOperator extends MultiStageOperator {
       return _upstreamErrorBlock;
     }
     if (leftBlock.isNoOpBlock() || (leftBlock.isSuccessfulEndOfStreamBlock() && !needUnmatchedRightRows())) {
+      if (!leftBlock.getResultMetadata().isEmpty()) {
+      }
+
+      if (leftBlock.isSuccessfulEndOfStreamBlock()) {
+        return TransferableBlockUtils.getEndOfStreamTransferableBlock();
+      }
+
       return leftBlock;
     }
     // TODO: Moved to a different function.
@@ -217,43 +210,56 @@ public class HashJoinOperator extends MultiStageOperator {
         }
       }
       _isTerminated = true;
-      _operatorStats.recordOutput(1, returnRows.size());
       return new TransferableBlock(returnRows, _resultSchema, DataBlock.Type.ROW);
     }
     List<Object[]> rows = new ArrayList<>();
     List<Object[]> container = leftBlock.isEndOfStreamBlock() ? new ArrayList<>() : leftBlock.getContainer();
     for (Object[] leftRow : container) {
       Key key = new Key(_leftKeySelector.getKey(leftRow));
-      // NOTE: Empty key selector will always give same hash code.
-      List<Object[]> matchedRightRows = _broadcastRightTable.getOrDefault(key, null);
-      if (matchedRightRows == null) {
-        if (needUnmatchedLeftRows()) {
-          rows.add(joinRow(leftRow, null));
-        }
-        continue;
-      }
-      boolean hasMatchForLeftRow = false;
-      for (int i = 0; i < matchedRightRows.size(); i++) {
-        Object[] rightRow = matchedRightRows.get(i);
-        // TODO: Optimize this to avoid unnecessary object copy.
-        Object[] resultRow = joinRow(leftRow, rightRow);
-        if (_joinClauseEvaluators.isEmpty() || _joinClauseEvaluators.stream().allMatch(
-            evaluator -> (Boolean) FunctionInvokeUtils.convert(evaluator.apply(resultRow),
-                DataSchema.ColumnDataType.BOOLEAN))) {
-          rows.add(resultRow);
-          hasMatchForLeftRow = true;
-          if (_matchedRightRows != null) {
-            HashSet<Integer> matchedRows = _matchedRightRows.computeIfAbsent(key, k -> new HashSet<>());
-            matchedRows.add(i);
+      switch (_joinType) {
+        case SEMI:
+          // SEMI-JOIN only checks existence of the key
+          if (_broadcastRightTable.containsKey(key)) {
+            rows.add(joinRow(leftRow, null));
           }
-        }
-      }
-      if (!hasMatchForLeftRow && needUnmatchedLeftRows()) {
-        rows.add(joinRow(leftRow, null));
+          break;
+        case ANTI:
+          // ANTI-JOIN only checks non-existence of the key
+          if (!_broadcastRightTable.containsKey(key)) {
+            rows.add(joinRow(leftRow, null));
+          }
+          break;
+        default: // INNER, LEFT, RIGHT, FULL
+          // NOTE: Empty key selector will always give same hash code.
+          List<Object[]> matchedRightRows = _broadcastRightTable.getOrDefault(key, null);
+          if (matchedRightRows == null) {
+            if (needUnmatchedLeftRows()) {
+              rows.add(joinRow(leftRow, null));
+            }
+            continue;
+          }
+          boolean hasMatchForLeftRow = false;
+          for (int i = 0; i < matchedRightRows.size(); i++) {
+            Object[] rightRow = matchedRightRows.get(i);
+            // TODO: Optimize this to avoid unnecessary object copy.
+            Object[] resultRow = joinRow(leftRow, rightRow);
+            if (_joinClauseEvaluators.isEmpty() || _joinClauseEvaluators.stream().allMatch(
+                evaluator -> (Boolean) FunctionInvokeUtils.convert(evaluator.apply(resultRow),
+                    DataSchema.ColumnDataType.BOOLEAN))) {
+              rows.add(resultRow);
+              hasMatchForLeftRow = true;
+              if (_matchedRightRows != null) {
+                HashSet<Integer> matchedRows = _matchedRightRows.computeIfAbsent(key, k -> new HashSet<>());
+                matchedRows.add(i);
+              }
+            }
+          }
+          if (!hasMatchForLeftRow && needUnmatchedLeftRows()) {
+            rows.add(joinRow(leftRow, null));
+          }
+          break;
       }
     }
-    _operatorStats.recordInput(1, container.size());
-    _operatorStats.recordOutput(1, rows.size());
     return new TransferableBlock(rows, _resultSchema, DataBlock.Type.ROW);
   }
 

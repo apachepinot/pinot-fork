@@ -40,7 +40,6 @@ import org.apache.pinot.query.runtime.blocks.TransferableBlockUtils;
  */
 public class GrpcReceivingMailbox implements ReceivingMailbox<TransferableBlock> {
   private static final long DEFAULT_MAILBOX_INIT_TIMEOUT = 100L;
-  private final GrpcMailboxService _mailboxService;
   private final String _mailboxId;
   private Consumer<MailboxIdentifier> _gotMailCallback;
   private final CountDownLatch _initializationLatch;
@@ -48,9 +47,7 @@ public class GrpcReceivingMailbox implements ReceivingMailbox<TransferableBlock>
 
   private MailboxContentStreamObserver _contentStreamObserver;
 
-  public GrpcReceivingMailbox(String mailboxId, GrpcMailboxService mailboxService,
-      Consumer<MailboxIdentifier> gotMailCallback) {
-    _mailboxService = mailboxService;
+  public GrpcReceivingMailbox(String mailboxId, Consumer<MailboxIdentifier> gotMailCallback) {
     _mailboxId = mailboxId;
     _gotMailCallback = gotMailCallback;
     _initializationLatch = new CountDownLatch(1);
@@ -94,6 +91,10 @@ public class GrpcReceivingMailbox implements ReceivingMailbox<TransferableBlock>
     return isInitialized() && _contentStreamObserver.isCompleted();
   }
 
+  @Override
+  public void cancel(Throwable e) {
+  }
+
   private boolean waitForInitialize()
       throws Exception {
     if (_initializationLatch.getCount() > 0) {
@@ -119,8 +120,9 @@ public class GrpcReceivingMailbox implements ReceivingMailbox<TransferableBlock>
   private TransferableBlock fromMailboxContent(MailboxContent mailboxContent)
       throws IOException {
     ByteBuffer byteBuffer = mailboxContent.getPayload().asReadOnlyByteBuffer();
+    DataBlock dataBlock = null;
     if (byteBuffer.hasRemaining()) {
-      DataBlock dataBlock = DataBlockUtils.getDataBlock(byteBuffer);
+      dataBlock = DataBlockUtils.getDataBlock(byteBuffer);
       if (dataBlock instanceof MetadataBlock && !dataBlock.getExceptions().isEmpty()) {
         return TransferableBlockUtils.getErrorTransferableBlock(dataBlock.getExceptions());
       }
@@ -130,6 +132,9 @@ public class GrpcReceivingMailbox implements ReceivingMailbox<TransferableBlock>
     }
 
     if (mailboxContent.getMetadataOrDefault(ChannelUtils.MAILBOX_METADATA_END_OF_STREAM_KEY, "false").equals("true")) {
+      if (dataBlock instanceof MetadataBlock) {
+        return TransferableBlockUtils.getEndOfStreamTransferableBlock(((MetadataBlock) dataBlock).getStats());
+      }
       return TransferableBlockUtils.getEndOfStreamTransferableBlock();
     }
 

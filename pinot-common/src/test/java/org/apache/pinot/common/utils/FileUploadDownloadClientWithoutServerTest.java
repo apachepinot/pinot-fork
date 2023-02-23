@@ -16,21 +16,26 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-package org.apache.pinot.query.planner.hints;
+package org.apache.pinot.common.utils;
 
-import org.apache.calcite.rel.hint.RelHint;
+import java.net.URI;
+import java.net.URISyntaxException;
+import org.testng.Assert;
+import org.testng.annotations.Test;
 
 
-/**
- * Provide certain relational hint to query planner for better optimization.
- */
-public class PinotRelationalHints {
-  public static final RelHint USE_HASH_DISTRIBUTE = RelHint.builder("USE_HASH_DISTRIBUTE").build();
-  public static final RelHint USE_BROADCAST_DISTRIBUTE = RelHint.builder("USE_BROADCAST_DISTRIBUTE").build();
-  public static final RelHint AGG_INTERMEDIATE_STAGE = RelHint.builder("AGG_INTERMEDIATE_STAGE").build();
-  public static final RelHint AGG_LEAF_STAGE = RelHint.builder("AGG_LEAF_STAGE").build();
+public class FileUploadDownloadClientWithoutServerTest {
+  @Test
+  public void testExtractBaseURI()
+      throws URISyntaxException {
+    Assert.assertEquals(FileUploadDownloadClient.extractBaseURI(new URI("http://example.com:8000/a/b?c=d")),
+        new URI("http://example.com:8000"));
+  }
 
-  private PinotRelationalHints() {
-    // do not instantiate.
+  @Test
+  public void testGetURI()
+      throws URISyntaxException {
+    Assert.assertEquals(FileUploadDownloadClient.getURI("http", "example.com", 8000),
+        new URI("http://example.com:8000"));
   }
 }

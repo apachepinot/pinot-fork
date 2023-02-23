@@ -55,7 +55,6 @@ public class MailboxSendOperator extends MultiStageOperator {
 
   private final MultiStageOperator _dataTableBlockBaseOperator;
   private final BlockExchange _exchange;
-  private OperatorStats _operatorStats;
 
   @VisibleForTesting
   interface BlockExchangeFactory {
@@ -71,16 +70,19 @@ public class MailboxSendOperator extends MultiStageOperator {
   public MailboxSendOperator(MailboxService<TransferableBlock> mailboxService,
       MultiStageOperator dataTableBlockBaseOperator, List<VirtualServer> receivingStageInstances,
       RelDistribution.Type exchangeType, KeySelector<Object[], Object[]> keySelector,
-      VirtualServerAddress sendingServer, long jobId, int stageId) {
+      VirtualServerAddress sendingServer, long jobId, int senderStageId, int receiverStageId) {
     this(mailboxService, dataTableBlockBaseOperator, receivingStageInstances, exchangeType, keySelector,
-        server -> toMailboxId(server, jobId, stageId, sendingServer), BlockExchange::getExchange, jobId, stageId);
+        server -> toMailboxId(server, jobId, senderStageId, receiverStageId, sendingServer), BlockExchange::getExchange,
+        jobId, senderStageId, receiverStageId, sendingServer);
   }
 
   @VisibleForTesting
   MailboxSendOperator(MailboxService<TransferableBlock> mailboxService,
       MultiStageOperator dataTableBlockBaseOperator, List<VirtualServer> receivingStageInstances,
       RelDistribution.Type exchangeType, KeySelector<Object[], Object[]> keySelector,
-      MailboxIdGenerator mailboxIdGenerator, BlockExchangeFactory blockExchangeFactory, long jobId, int stageId) {
+      MailboxIdGenerator mailboxIdGenerator, BlockExchangeFactory blockExchangeFactory, long jobId, int senderStageId,
+      int receiverStageId, VirtualServerAddress serverAddress) {
+    super(jobId, senderStageId, serverAddress);
     _dataTableBlockBaseOperator = dataTableBlockBaseOperator;
 
     List<MailboxIdentifier> receivingMailboxes;
@@ -90,6 +92,11 @@ public class MailboxSendOperator extends MultiStageOperator {
       for (VirtualServer serverInstance : receivingStageInstances) {
         if (serverInstance.getHostname().equals(mailboxService.getHostname())
             && serverInstance.getQueryMailboxPort() == mailboxService.getMailboxPort()) {
+          if (singletonInstance != null && singletonInstance.getServer().equals(serverInstance.getServer())) {
+            throw new IllegalArgumentException("Cannot issue query with stageParallelism > 1 for queries that "
+                + "use SINGLETON exchange. This is an internal limitation that is being worked on - reissue "
+                + "your query again without stageParallelism.");
+          }
           Preconditions.checkState(singletonInstance == null, "multiple instance found for singleton exchange type!");
           singletonInstance = serverInstance;
         }
@@ -108,41 +115,30 @@ public class MailboxSendOperator extends MultiStageOperator {
 
     Preconditions.checkState(SUPPORTED_EXCHANGE_TYPE.contains(exchangeType),
         String.format("Exchange type '%s' is not supported yet", exchangeType));
-    _operatorStats = new OperatorStats(jobId, stageId, EXPLAIN_NAME);
   }
 
   @Override
   public List<MultiStageOperator> getChildOperators() {
-    return ImmutableList.of();
+    return ImmutableList.of(_dataTableBlockBaseOperator);
   }
 
   @Nullable
   @Override
   public String toExplainString() {
-    _dataTableBlockBaseOperator.toExplainString();
-    LOGGER.debug(_operatorStats.toString());
     return EXPLAIN_NAME;
   }
 
   @Override
   protected TransferableBlock getNextBlock() {
-    _operatorStats.startTimer();
     TransferableBlock transferableBlock;
     try {
-      _operatorStats.endTimer();
       transferableBlock = _dataTableBlockBaseOperator.nextBlock();
-      _operatorStats.startTimer();
       while (!transferableBlock.isNoOpBlock()) {
         _exchange.send(transferableBlock);
-        _operatorStats.recordInput(1, transferableBlock.getNumRows());
-        // The # of output block is not accurate because we may do a split in exchange send.
-        _operatorStats.recordOutput(1, transferableBlock.getNumRows());
         if (transferableBlock.isEndOfStreamBlock()) {
           return transferableBlock;
         }
-        _operatorStats.endTimer();
         transferableBlock = _dataTableBlockBaseOperator.nextBlock();
-        _operatorStats.startTimer();
       }
     } catch (final Exception e) {
       // ideally, MailboxSendOperator doesn't ever throw an exception because
@@ -154,17 +150,15 @@ public class MailboxSendOperator extends MultiStageOperator {
       } catch (Exception e2) {
         LOGGER.error("Exception while sending block to mailbox.", e2);
       }
-    } finally {
-      _operatorStats.endTimer();
     }
     return transferableBlock;
   }
 
   private static JsonMailboxIdentifier toMailboxId(
-      VirtualServer destination, long jobId, int stageId, VirtualServerAddress sender) {
+      VirtualServer destination, long jobId, int senderStageId, int receiverStageId, VirtualServerAddress sender) {
     return new JsonMailboxIdentifier(
-        String.format("%s_%s", jobId, stageId),
+        String.format("%s_%s", jobId, senderStageId),
         sender,
-        new VirtualServerAddress(destination));
+        new VirtualServerAddress(destination), senderStageId, receiverStageId);
   }
 }
